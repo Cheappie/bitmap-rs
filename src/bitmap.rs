@@ -539,126 +539,167 @@ impl Bitmap {
         self.cardinality_in_range(0..range_end)
     }
 
-    pub fn iter(&self) -> Iter {
-        Iter::new(&self)
+    pub fn iter(&self) -> impl BatchIterator + '_ {
+        let word_iter = self
+            .words
+            .iter()
+            .enumerate()
+            .map(|(p, &w)| (p, w))
+            .filter(|&(_, w)| w != 0);
+
+        Iter::new(word_iter)
     }
 
-    pub fn iter_rev(&self) -> IterRev {
-        IterRev::new(&self)
+    pub fn iter_rev(&self) -> impl BatchIterator + '_ {
+        let word_iter = self
+            .words
+            .iter()
+            .rev()
+            .enumerate()
+            .map(|(p, &w)| (p, w))
+            .filter(|&(_, w)| w != 0);
+
+        IterRev::new(word_iter, self.words.len())
     }
 
-    pub fn iter_rank(&self) -> IterRank {
+    pub fn iter_rank(&self) -> impl Iterator<Item = Rank> + '_ {
         IterRank::new(self.iter())
     }
 }
 
-pub struct Iter<'a> {
-    bitmap: &'a Bitmap,
-    forward_bit: Option<u32>,
+pub trait BatchIterator: Iterator<Item = u32> {
+    fn next_batch(&mut self, dst: &mut [u32]) -> u32;
 }
 
-impl<'a> Iter<'a> {
-    pub fn new(bitmap: &'a Bitmap) -> Iter<'a> {
-        Iter {
-            bitmap,
-            forward_bit: None,
-        }
+pub struct Iter<I> {
+    iter: I,
+    word: Option<(usize, i64)>,
+}
+
+impl<I> Iter<I> {
+    pub fn new(iter: I) -> Iter<I> {
+        Iter { iter, word: None }
     }
 }
 
-impl<'a> Iterator for Iter<'a> {
+impl<I> BatchIterator for Iter<I>
+where
+    I: Iterator<Item = (usize, i64)>,
+{
+    fn next_batch(&mut self, dst: &mut [u32]) -> u32 {
+        let mut off = 0;
+
+        while let Some((i, w)) = self.word.take().or_else(|| self.iter.next()) {
+            let curr_cap = w.count_ones().min((dst.len() - off) as u32);
+            let word_shift = i as u32 * i64::BITS;
+
+            let mut word = w;
+
+            for _ in 0..curr_cap {
+                dst[off] = word_shift + word.trailing_zeros();
+                off += 1;
+                word &= word - 1;
+            }
+
+            if word != 0 {
+                self.word.insert((i, word));
+            }
+
+            if off == dst.len() {
+                break;
+            }
+        }
+
+        off as u32
+    }
+}
+
+impl<I> Iterator for Iter<I>
+where
+    I: Iterator<Item = (usize, i64)>,
+{
     type Item = u32;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let from = self.forward_bit.map(|p| p + 1).unwrap_or(u32::MIN);
-        if let Some(next) = self.bitmap.next_set_bit(from) {
-            self.forward_bit.insert(next);
-            Some(next)
+        let word = self
+            .word
+            .filter(|&(_, w)| w != 0)
+            .or_else(|| self.iter.next());
+
+        if let Some((i, w)) = word {
+            self.word.insert((i, w & (w - 1)));
+            Some(i as u32 * i64::BITS + w.trailing_zeros())
         } else {
             None
         }
     }
-
-    // optimize ?
-    // fn advance_by(&mut self, n: usize) -> Result<(), usize> {
-    //     todo!()
-    // }
-
-    // optimize
-    // fn skip_while<P>(self, predicate: P) -> SkipWhile<Self, P>
-    // where
-    //     Self: Sized,
-    //     P: FnMut(&Self::Item) -> bool,
-    // {
-    //     Iterator::skip_while(self, predicate)
-    // }
-    //
-    // // optimize
-    // fn skip(self, n: usize) -> Skip<Self>
-    // where
-    //     Self: Sized,
-    // {
-    //     Iterator::skip(self, n)
-    // }
 }
 
-pub struct IterRev<'a> {
-    bitmap: &'a Bitmap,
-    backward_bit: Option<u32>,
+pub struct IterRev<I> {
+    iter: I,
+    word: Option<(usize, i64)>,
+    len: usize,
 }
 
-impl<'a> IterRev<'a> {
-    pub fn new(bitmap: &'a Bitmap) -> IterRev<'a> {
+impl<I> IterRev<I> {
+    pub fn new(iter: I, len: usize) -> IterRev<I> {
         IterRev {
-            bitmap,
-            backward_bit: Some(u32::MAX),
+            iter,
+            word: None,
+            len,
         }
     }
 }
 
-impl<'a> Iterator for IterRev<'a> {
+impl<I> BatchIterator for IterRev<I>
+where
+    I: Iterator<Item = (usize, i64)>,
+{
+    fn next_batch(&mut self, dst: &mut [u32]) -> u32 {
+        let mut off = 0;
+
+        while let Some(b) = self.next() {
+            if off < dst.len() {
+                dst[off] = b;
+                off += 1;
+            } else {
+                break;
+            }
+        }
+
+        off as u32
+    }
+}
+
+impl<I> Iterator for IterRev<I>
+where
+    I: Iterator<Item = (usize, i64)>,
+{
     type Item = u32;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let from = self.backward_bit.filter(|&x| x > 0).map(|x| x - 1);
-        if let Some(next) = from.and_then(|x| self.bitmap.previous_set_bit(x)) {
-            self.backward_bit.insert(next);
-            Some(next)
+        let word = self
+            .word
+            .filter(|&(_, w)| w != 0)
+            .or_else(|| self.iter.next());
+
+        if let Some((i, w)) = word {
+            let offset = i64::BITS - w.leading_zeros() - 1;
+            self.word.insert((i, w ^ (1i64 << offset)));
+            Some((self.len - i - 1) as u32 * i64::BITS + offset)
         } else {
             None
         }
     }
-
-    // optimize ?
-    // fn advance_by(&mut self, n: usize) -> Result<(), usize> {
-    //     todo!()
-    // }
-
-    // // optimize
-    // fn skip_while<P>(self, predicate: P) -> SkipWhile<Self, P>
-    // where
-    //     Self: Sized,
-    //     P: FnMut(&Self::Item) -> bool,
-    // {
-    //     Iterator::skip_while(self, predicate)
-    // }
-    //
-    // // optimize
-    // fn skip(self, n: usize) -> Skip<Self>
-    // where
-    //     Self: Sized,
-    // {
-    //     Iterator::skip(self, n)
-    // }
 }
 
-pub struct IterRank<'a> {
-    iter: Iter<'a>,
+pub struct IterRank<I> {
+    iter: I,
     cardinality: u32,
 }
 
-impl<'a> IterRank<'a> {
-    pub fn new(iter: Iter<'a>) -> IterRank {
+impl<I> IterRank<I> {
+    pub fn new(iter: I) -> IterRank<I> {
         IterRank {
             iter,
             cardinality: 0,
@@ -675,7 +716,10 @@ pub struct Rank {
     rank: u32,
 }
 
-impl Iterator for IterRank<'_> {
+impl<I> Iterator for IterRank<I>
+where
+    I: BatchIterator,
+{
     type Item = Rank;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -706,20 +750,14 @@ fn single_word_range_mask(range: Range<u32>) -> i64 {
     low_bit_mask(range.start) & high_bit_mask(range.end)
 }
 
-/// start inclusive
-///
-///
 #[inline]
 fn low_bit_mask(start: u32) -> i64 {
-    (WORD_MASK_U64 << offset_word(start)) as i64
+    (WORD_MASK_U64 << (start & 0x3F)) as i64
 }
 
-/// end exclusive
-///
-///
 #[inline]
 fn high_bit_mask(end: u32) -> i64 {
-    (WORD_MASK_U64 >> ((64 - offset_word(end)) & 0x3F)) as i64
+    (WORD_MASK_U64 >> ((i64::BITS - offset_word(end)) & 0x3F)) as i64
 }
 
 #[inline]
@@ -730,9 +768,44 @@ fn merge_origin_with_transformed(origin: i64, transformed: i64, mask: i64) -> i6
     res
 }
 
+fn print_words(words: &[i64]) {
+    for &w in words {
+        println!("{}", binary_to_string(w));
+    }
+}
+
+fn binary_to_string(word: i64) -> String {
+    let mut buff = String::with_capacity(64);
+
+    for i in (0..64).rev() {
+        if (word & 1i64 << i) != 0 {
+            buff.push('1');
+        } else {
+            buff.push('0');
+        }
+    }
+
+    buff
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::bitmap::{Bitmap, Rank};
+    use crate::bitmap::{binary_to_string, BatchIterator, Bitmap, Rank};
+
+    #[test]
+    fn print_word() {
+        let mut bitmap = Bitmap::new();
+
+        bitmap.insert(1);
+        bitmap.insert_range(10..15);
+        bitmap.insert(63);
+
+        let words = bitmap.words;
+        assert_eq!(
+            "1000000000000000000000000000000000000000000000000111110000000010",
+            binary_to_string(words[0])
+        );
+    }
 
     #[test]
     fn should_estimate_cardinality_of_single_bit() {
@@ -1116,6 +1189,100 @@ mod tests {
     }
 
     #[test]
+    fn iter_batch_empty() {
+        //given
+        let bitmap = Bitmap::new();
+        let mut iter = bitmap.iter();
+
+        let mut buff: Vec<u32> = vec![0; 8];
+
+        //when
+        let result = iter.next_batch(&mut buff);
+
+        //then
+        assert_eq!(0, result);
+        assert_eq!(8, buff.into_iter().filter(|&x| x == 0).count());
+    }
+
+    #[test]
+    fn iter_batch_over_empty_bitmap_with_empty_buffer() {
+        //given
+        let bitmap = Bitmap::new();
+        let mut iter = bitmap.iter();
+
+        let mut buff: Vec<u32> = vec![0; 0];
+
+        //when
+        let result = iter.next_batch(&mut buff);
+
+        //then
+        assert_eq!(0, result);
+    }
+
+    #[test]
+    fn iter_batch_read_one_by_one() {
+        //given
+        let mut bitmap = Bitmap::new();
+        bitmap.insert(5);
+        bitmap.insert(100);
+        bitmap.insert(500);
+
+        let mut iter = bitmap.iter();
+        let mut buff: Vec<u32> = vec![0; 1];
+
+        //when
+        let result = iter.next_batch(&mut buff);
+
+        //then
+        assert_eq!(1, result);
+        assert_eq!(5, buff[0]);
+
+        //when
+        let result = iter.next_batch(&mut buff);
+
+        //then
+        assert_eq!(1, result);
+        assert_eq!(100, buff[0]);
+
+        //when
+        let result = iter.next_batch(&mut buff);
+
+        //then
+        assert_eq!(1, result);
+        assert_eq!(500, buff[0]);
+    }
+
+    #[test]
+    fn iter_batch_multi_word() {
+        //given
+        let mut bitmap = Bitmap::new();
+
+        bitmap.insert(0);
+        bitmap.insert(100);
+        bitmap.insert(101);
+        bitmap.insert(1024);
+
+        let mut iter = bitmap.iter();
+        let mut buff: Vec<u32> = vec![0; 3];
+
+        //when
+        let read = iter.next_batch(&mut buff);
+
+        //then
+        assert_eq!(3, read);
+        assert_eq!(0, buff[0]);
+        assert_eq!(100, buff[1]);
+        assert_eq!(101, buff[2]);
+
+        //when
+        let read = iter.next_batch(&mut buff);
+
+        //then
+        assert_eq!(1, read);
+        assert_eq!(1024, buff[0]);
+    }
+
+    #[test]
     fn iter_rev_empty() {
         //given
         let bitmap = Bitmap::new();
@@ -1152,9 +1319,15 @@ mod tests {
         bitmap.insert(101);
         bitmap.insert(1024);
 
+        //when
         let mut iter = bitmap.iter_rev();
 
-        //when
+        let x: Vec<u32> = iter.collect();
+        println!("{:?}", x);
+
+        iter = bitmap.iter_rev();
+
+        //then
         assert_eq!(1024, iter.next().unwrap());
         assert_eq!(101, iter.next().unwrap());
         assert_eq!(100, iter.next().unwrap());
@@ -1215,19 +1388,6 @@ mod tests {
         let rankstruct = next.unwrap();
         assert_eq!(bit, rankstruct.bit);
         assert_eq!(rank, rankstruct.rank);
-    }
-
-    #[test]
-    fn iter_rank_ddmulti_word() {
-        //given
-        let mut bitmap = Bitmap::new();
-
-        bitmap.insert(0);
-        bitmap.insert(100);
-        bitmap.insert(101);
-        bitmap.insert(1024);
-
-        println!("{}", bitmap);
     }
 }
 
