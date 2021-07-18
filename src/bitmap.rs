@@ -122,9 +122,8 @@ impl Bitmap {
 
         if let Some(w) = self.words.get_mut(word_index) {
             *w ^= 1i64 << offset_word(bit);
+            self.truncate_word_array();
         }
-
-        self.truncate_word_array();
     }
 
     pub fn flip_range(&mut self, range: Range<u32>) {
@@ -158,7 +157,7 @@ impl Bitmap {
         for i in (0..self.words.len()).rev() {
             let w = self.words[i];
             if w != 0 {
-                return Some((i as u32) * i64::BITS + (i64::BITS - (w.leading_zeros() + 1)));
+                return Some((i as u32) * i64::BITS + (i64::BITS - w.leading_zeros() - 1));
             }
         }
 
