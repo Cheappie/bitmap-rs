@@ -1322,11 +1322,6 @@ mod tests {
         //when
         let mut iter = bitmap.iter_rev();
 
-        let x: Vec<u32> = iter.collect();
-        println!("{:?}", x);
-
-        iter = bitmap.iter_rev();
-
         //then
         assert_eq!(1024, iter.next().unwrap());
         assert_eq!(101, iter.next().unwrap());
@@ -1399,85 +1394,67 @@ mod test_previous_next_jumps {
     fn find_closest_next_set_bit() {
         //given
         let mut bitmap = Bitmap::new();
+        let set_bits = vec![30, 40, 63, 64, 66, 70];
+        bitmap.insert_many(&set_bits);
 
-        //when
-        bitmap.insert_many(&vec![30, 40, 65, 70]);
+        for i in (0..192).rev() {
+            let expected = set_bits.iter().copied().find(|&x| x >= i);
 
-        //then
-        assert_eq!(30, bitmap.next_set_bit(0).unwrap());
-        assert_eq!(30, bitmap.next_set_bit(29).unwrap());
-        assert_eq!(30, bitmap.next_set_bit(30).unwrap());
-
-        assert_eq!(40, bitmap.next_set_bit(31).unwrap());
-        assert_eq!(40, bitmap.next_set_bit(40).unwrap());
-
-        assert_eq!(65, bitmap.next_set_bit(63).unwrap());
-        assert_eq!(65, bitmap.next_set_bit(64).unwrap());
-        assert_eq!(65, bitmap.next_set_bit(65).unwrap());
-
-        assert_eq!(70, bitmap.next_set_bit(66).unwrap());
-        assert_eq!(70, bitmap.next_set_bit(70).unwrap());
-
-        assert!(bitmap.next_set_bit(71).is_none());
-        assert!(bitmap.next_set_bit(1024).is_none());
+            if let Some(exp) = expected {
+                assert_eq!(exp, bitmap.next_set_bit(i).unwrap());
+            } else {
+                assert!(bitmap.next_set_bit(i).is_none());
+            }
+        }
     }
 
     #[test]
     fn find_closest_previous_set_bit() {
         //given
         let mut bitmap = Bitmap::new();
+        let set_bits = vec![30, 40, 63, 64, 66, 70];
+        bitmap.insert_many(&set_bits);
 
-        //when
-        bitmap.insert_many(&vec![30, 40, 65, 70]);
+        for i in (0..192).rev() {
+            let expected = set_bits.iter().copied().rev().find(|&x| x <= i);
 
-        //then
-        assert!(bitmap.previous_set_bit(0).is_none());
-        assert!(bitmap.previous_set_bit(29).is_none());
-
-        assert_eq!(30, bitmap.previous_set_bit(30).unwrap());
-        assert_eq!(30, bitmap.previous_set_bit(39).unwrap());
-
-        assert_eq!(40, bitmap.previous_set_bit(40).unwrap());
-        assert_eq!(40, bitmap.previous_set_bit(63).unwrap());
-        assert_eq!(40, bitmap.previous_set_bit(64).unwrap());
-
-        assert_eq!(65, bitmap.previous_set_bit(65).unwrap());
-        assert_eq!(65, bitmap.previous_set_bit(69).unwrap());
-
-        assert_eq!(70, bitmap.previous_set_bit(70).unwrap());
-        assert_eq!(70, bitmap.previous_set_bit(71).unwrap());
-        assert_eq!(70, bitmap.previous_set_bit(1024).unwrap());
+            if let Some(exp) = expected {
+                assert_eq!(exp, bitmap.previous_set_bit(i).unwrap());
+            } else {
+                assert!(bitmap.previous_set_bit(i).is_none());
+            }
+        }
     }
 
     #[test]
     fn find_closest_next_clear_bit() {
+        //given
         let mut bitmap = Bitmap::new();
-        bitmap.insert_many(&vec![30, 40, 64, 65, 70]);
+        let set_bits = vec![30, 40, 62, 64, 66, 70];
+        bitmap.insert_many(&set_bits);
 
-        assert_eq!(0, bitmap.next_clear_bit(0).unwrap());
-        assert_eq!(29, bitmap.next_clear_bit(29).unwrap());
-        assert_eq!(31, bitmap.next_clear_bit(30).unwrap());
-        assert_eq!(66, bitmap.next_clear_bit(64).unwrap());
-        assert_eq!(69, bitmap.next_clear_bit(69).unwrap());
-        assert_eq!(71, bitmap.next_clear_bit(70).unwrap());
-        assert_eq!(120, bitmap.next_clear_bit(120).unwrap());
-        assert_eq!(1024, bitmap.next_clear_bit(1024).unwrap());
+        for i in (0..192).rev() {
+            if set_bits.contains(&i) {
+                assert_eq!(i + 1, bitmap.next_clear_bit(i).unwrap())
+            } else {
+                assert_eq!(i, bitmap.next_clear_bit(i).unwrap())
+            }
+        }
     }
 
     #[test]
     fn find_closest_previous_clear_bit() {
+        //given
         let mut bitmap = Bitmap::new();
-        bitmap.insert_many(&vec![30, 40, 64, 65, 70]);
-        bitmap.insert_range(0..30);
+        let set_bits = vec![30, 40, 62, 64, 66, 70];
+        bitmap.insert_many(&set_bits);
 
-        assert_eq!(1024, bitmap.previous_clear_bit(1024).unwrap());
-        assert_eq!(71, bitmap.previous_clear_bit(71).unwrap());
-        assert_eq!(69, bitmap.previous_clear_bit(70).unwrap());
-        assert_eq!(66, bitmap.previous_clear_bit(66).unwrap());
-        assert_eq!(63, bitmap.previous_clear_bit(65).unwrap());
-        assert_eq!(31, bitmap.previous_clear_bit(31).unwrap());
-
-        assert!(bitmap.previous_clear_bit(30).is_none());
-        assert!(bitmap.previous_clear_bit(0).is_none());
+        for i in (0..192).rev() {
+            if set_bits.contains(&i) {
+                assert_eq!(i - 1, bitmap.previous_clear_bit(i).unwrap())
+            } else {
+                assert_eq!(i, bitmap.previous_clear_bit(i).unwrap())
+            }
+        }
     }
 }
