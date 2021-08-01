@@ -51,19 +51,19 @@ impl Bitmap {
     }
 
     pub fn insert_range(&mut self, range: Range<u32>) {
-        self.transform_range(range, |_| WORD_MASK_I64)
-    }
-
-    fn transform_range(&mut self, range: Range<u32>, transformer: fn(i64) -> i64) {
         if range.is_empty() {
             return;
         }
 
+        let new_len = index_word(range.end - 1) + 1;
+        self.grow(new_len);
+
+        self.transform_range(range, |_| WORD_MASK_I64)
+    }
+
+    fn transform_range(&mut self, range: Range<u32>, transformer: fn(i64) -> i64) {
         let start_index = index_word(range.start);
         let end_index = index_word(range.end - 1);
-
-        let new_len = end_index + 1;
-        self.grow(new_len);
 
         if start_index == end_index {
             let word = self.words[start_index];
@@ -73,6 +73,13 @@ impl Bitmap {
                 single_word_range_mask(range),
             );
         } else {
+            let len = self.words.len();
+            let (end_index, end_mask) = if end_index < len {
+                (end_index, high_bit_mask(range.end))
+            } else {
+                (len - 1, WORD_MASK_I64)
+            };
+
             let first = self.words[start_index];
             self.words[start_index] =
                 merge_origin_with_transformed(first, transformer(first), low_bit_mask(range.start));
@@ -83,7 +90,7 @@ impl Bitmap {
 
             let last = self.words[end_index];
             self.words[end_index] =
-                merge_origin_with_transformed(last, transformer(last), high_bit_mask(range.end));
+                merge_origin_with_transformed(last, transformer(last), end_mask);
         }
     }
 
@@ -112,6 +119,10 @@ impl Bitmap {
     }
 
     pub fn remove_range(&mut self, range: Range<u32>) {
+        if range.is_empty() || self.words.len() == 0 {
+            return;
+        }
+
         self.transform_range(range, |_| 0);
         self.truncate_word_array();
     }
@@ -127,6 +138,13 @@ impl Bitmap {
     }
 
     pub fn flip_range(&mut self, range: Range<u32>) {
+        if range.is_empty() {
+            return;
+        }
+
+        let new_len = index_word(range.end - 1) + 1;
+        self.grow(new_len);
+
         self.transform_range(range, |w| !w);
         self.truncate_word_array();
     }
@@ -372,12 +390,23 @@ impl Bitmap {
             return 0;
         }
 
+        let len = self.words.len();
+        if len == 0 {
+            return 0;
+        }
+
         let start_index = index_word(range.start);
         let end_index = index_word(range.end - 1);
 
         if start_index == end_index {
             (self.words[start_index] & single_word_range_mask(range)).count_ones()
         } else {
+            let (end_index, end_mask) = if end_index < len {
+                (end_index, high_bit_mask(range.end))
+            } else {
+                (len - 1, WORD_MASK_I64)
+            };
+
             let mut cardinality: u32 =
                 (self.words[start_index] & low_bit_mask(range.start)).count_ones();
 
@@ -385,7 +414,7 @@ impl Bitmap {
                 cardinality += self.words[i].count_ones();
             }
 
-            cardinality += (self.words[end_index] & high_bit_mask(range.end)).count_ones();
+            cardinality += (self.words[end_index] & end_mask).count_ones();
             cardinality
         }
     }
@@ -808,6 +837,16 @@ mod tests {
     }
 
     #[test]
+    fn should_clone_bitmap() {
+        let mut bitmap = Bitmap::new();
+        bitmap.insert(8);
+
+        let clone = bitmap.clone();
+        assert!(clone.contains(8));
+        assert_eq!(bitmap.cardinality(), clone.cardinality());
+    }
+
+    #[test]
     fn should_estimate_cardinality_of_single_bit() {
         //given
         let mut bitmap = Bitmap::new();
@@ -1132,13 +1171,88 @@ mod tests {
     }
 
     #[test]
-    fn flip_range() {}
+    fn flip_range() {
+        let mut bitmap = Bitmap::new();
+
+        bitmap.insert(63);
+        bitmap.flip_range(63..65);
+
+        assert!(!bitmap.contains(63));
+        assert!(bitmap.contains(64));
+
+        assert_eq!(1, bitmap.cardinality());
+    }
 
     #[test]
-    fn insert_range() {}
+    fn flip_empty_range_is_nop() {
+        let mut bitmap = Bitmap::new();
+        bitmap.flip_range(512..0);
+        assert_eq!(0, bitmap.cardinality());
+    }
 
     #[test]
-    fn remove_range() {}
+    fn insert_range() {
+        let mut bitmap = Bitmap::new();
+
+        bitmap.insert_range(0..70);
+
+        let mut cardinality_in_range = 0;
+        for i in 0..70 {
+            cardinality_in_range += bitmap.contains_binary(i);
+        }
+
+        assert_eq!(70, cardinality_in_range);
+        assert_eq!(70, bitmap.cardinality());
+    }
+
+    #[test]
+    fn insert_empty_range_is_nop() {
+        let mut bitmap = Bitmap::new();
+        bitmap.insert_range(512..0);
+        assert_eq!(0, bitmap.cardinality());
+    }
+
+    #[test]
+    fn remove_range() {
+        let mut bitmap = Bitmap::new();
+
+        bitmap.insert_range(13..20);
+        bitmap.insert_range(40..70);
+
+        bitmap.remove_range(15..69);
+
+        assert!(bitmap.contains(13));
+        assert!(bitmap.contains(14));
+        assert!(bitmap.contains(69));
+
+        assert_eq!(3, bitmap.cardinality());
+    }
+
+    #[test]
+    fn remove_range_beyond_last_set_bit() {
+        let mut bitmap = Bitmap::new();
+
+        bitmap.insert_range(64..192);
+        bitmap.remove_range(0..300);
+
+        assert_eq!(0, bitmap.cardinality());
+    }
+
+    #[test]
+    fn remove_range_on_empty_bitmap_is_nop() {
+        let mut bitmap = Bitmap::new();
+        bitmap.remove_range(100..700);
+    }
+
+    #[test]
+    fn remove_empty_range_is_nop() {
+        let mut bitmap = Bitmap::new();
+
+        bitmap.insert_range(0..64);
+        bitmap.remove_range(64..0); // 64..0 is an empty range
+
+        assert_eq!(64, bitmap.cardinality());
+    }
 
     #[test]
     fn iter_empty() {
@@ -1384,20 +1498,101 @@ mod tests {
         assert_eq!(bit, rankstruct.bit);
         assert_eq!(rank, rankstruct.rank);
     }
+
+    #[test]
+    fn should_shrink_backing_array() {
+        let mut bitmap = Bitmap::new();
+
+        bitmap.insert(128);
+        bitmap.insert(1024);
+
+        bitmap.remove(1024);
+
+        bitmap.trim();
+
+        assert_eq!(bitmap.words.len(), bitmap.words.capacity());
+    }
+
+    #[test]
+    fn should_properly_calculate_serialized_size() {
+        let mut bitmap = Bitmap::new();
+
+        bitmap.insert(1024);
+
+        assert_eq!(
+            (bitmap.words.len() * 8) as u32,
+            bitmap.serialized_size_bytes()
+        );
+    }
+
+    #[test]
+    fn rank() {
+        let mut bitmap = Bitmap::new();
+
+        bitmap.insert(1);
+        bitmap.insert(3);
+        bitmap.insert(5);
+
+        bitmap.insert(150);
+
+        assert_eq!(0, bitmap.rank(1));
+        assert_eq!(1, bitmap.rank(2));
+        assert_eq!(1, bitmap.rank(3));
+        assert_eq!(2, bitmap.rank(4));
+        assert_eq!(2, bitmap.rank(5));
+
+        assert_eq!(3, bitmap.rank(150));
+        assert_eq!(4, bitmap.rank(151));
+        assert_eq!(4, bitmap.rank(500));
+    }
+
+    #[test]
+    fn cardinality_in_range() {
+        let mut bitmap = Bitmap::new();
+
+        bitmap.insert_range(127..260);
+        bitmap.insert(266);
+        bitmap.insert(340);
+        bitmap.insert_range(344..420);
+        bitmap.insert(500);
+
+        assert_eq!(23, bitmap.cardinality_in_range(0..150));
+        assert_eq!(23, bitmap.cardinality_in_range(127..150));
+
+        assert_eq!(133, bitmap.cardinality_in_range(127..266));
+        assert_eq!(134, bitmap.cardinality_in_range(127..267));
+
+        assert_eq!(168, bitmap.cardinality_in_range(150..400));
+
+        assert_eq!(79, bitmap.cardinality_in_range(266..800));
+    }
+
+    #[test]
+    fn cardinality_in_range_over_empty_bitmap() {
+        let mut bitmap = Bitmap::new();
+        assert_eq!(0, bitmap.cardinality_in_range(0..u32::MAX))
+    }
+
+    #[test]
+    fn cardinality_in_empty_range() {
+        let mut bitmap = Bitmap::new();
+        bitmap.insert_range(0..1024);
+        assert_eq!(0, bitmap.cardinality_in_range(u32::MAX..0))
+    }
 }
 
 #[cfg(test)]
-mod test_previous_next_jumps {
+mod test_jump_to_next_or_previous_bit {
     use crate::bitmap::Bitmap;
 
     #[test]
     fn find_closest_next_set_bit() {
         //given
         let mut bitmap = Bitmap::new();
-        let set_bits = vec![30, 40, 63, 64, 66, 70];
+        let set_bits = vec![30, 40, 63, 64, 66, 70, 260];
         bitmap.insert_many(&set_bits);
 
-        for i in (0..192).rev() {
+        for i in (0..512).rev() {
             let expected = set_bits.iter().copied().find(|&x| x >= i);
 
             if let Some(exp) = expected {
@@ -1412,10 +1607,10 @@ mod test_previous_next_jumps {
     fn find_closest_previous_set_bit() {
         //given
         let mut bitmap = Bitmap::new();
-        let set_bits = vec![30, 40, 63, 64, 66, 70];
+        let set_bits = vec![30, 40, 63, 64, 66, 70, 260];
         bitmap.insert_many(&set_bits);
 
-        for i in (0..192).rev() {
+        for i in (0..512).rev() {
             let expected = set_bits.iter().copied().rev().find(|&x| x <= i);
 
             if let Some(exp) = expected {
@@ -1430,10 +1625,10 @@ mod test_previous_next_jumps {
     fn find_closest_next_clear_bit() {
         //given
         let mut bitmap = Bitmap::new();
-        let set_bits = vec![30, 40, 62, 64, 66, 70];
+        let set_bits = vec![30, 40, 62, 64, 66, 70, 260];
         bitmap.insert_many(&set_bits);
 
-        for i in (0..192).rev() {
+        for i in (0..512).rev() {
             if set_bits.contains(&i) {
                 assert_eq!(i + 1, bitmap.next_clear_bit(i).unwrap())
             } else {
@@ -1446,15 +1641,208 @@ mod test_previous_next_jumps {
     fn find_closest_previous_clear_bit() {
         //given
         let mut bitmap = Bitmap::new();
-        let set_bits = vec![30, 40, 62, 64, 66, 70];
+        let set_bits = vec![30, 40, 62, 64, 66, 70, 260];
         bitmap.insert_many(&set_bits);
 
-        for i in (0..192).rev() {
+        for i in (0..512).rev() {
             if set_bits.contains(&i) {
                 assert_eq!(i - 1, bitmap.previous_clear_bit(i).unwrap())
             } else {
                 assert_eq!(i, bitmap.previous_clear_bit(i).unwrap())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod test_base_ops {
+    use crate::Bitmap;
+
+    #[test]
+    fn test_in_place_and() {
+        let mut b1 = Bitmap::new();
+
+        b1.insert(150);
+        b1.insert(400);
+        b1.insert_range(10..14);
+
+        let mut b2 = Bitmap::new();
+
+        b2.insert(151);
+        b2.insert(400);
+        b2.insert(700);
+        b2.insert_range(13..14);
+
+        b1.and(&b2);
+
+        assert!(b1.contains(13));
+        assert!(b1.contains(400));
+
+        assert_eq!(2, b1.cardinality());
+    }
+
+    #[test]
+    fn test_in_place_or() {
+        let mut b1 = Bitmap::new();
+
+        b1.insert(150);
+        b1.insert(400);
+        b1.insert_range(10..14);
+
+        let mut b2 = Bitmap::new();
+
+        b2.insert(151);
+        b2.insert(400);
+        b2.insert(700);
+        b2.insert_range(13..14);
+
+        b1.or(&b2);
+
+        assert!(b1.contains(10));
+        assert!(b1.contains(11));
+        assert!(b1.contains(12));
+        assert!(b1.contains(13));
+
+        assert!(b1.contains(150));
+        assert!(b1.contains(151));
+        assert!(b1.contains(400));
+        assert!(b1.contains(700));
+
+        assert_eq!(8, b1.cardinality());
+    }
+
+    #[test]
+    fn test_in_place_xor() {
+        let mut b1 = Bitmap::new();
+
+        b1.insert(150);
+        b1.insert(400);
+        b1.insert_range(10..14);
+
+        let mut b2 = Bitmap::new();
+
+        b2.insert(151);
+        b2.insert(400);
+        b2.insert(700);
+        b2.insert_range(13..14);
+
+        b1.xor(&b2);
+
+        assert!(b1.contains(10));
+        assert!(b1.contains(11));
+        assert!(b1.contains(12));
+
+        assert!(b1.contains(150));
+        assert!(b1.contains(151));
+        assert!(b1.contains(700));
+
+        assert_eq!(6, b1.cardinality());
+    }
+
+    #[test]
+    fn test_in_place_and_not() {
+        let mut b1 = Bitmap::new();
+
+        b1.insert(150);
+        b1.insert(400);
+        b1.insert_range(10..14);
+
+        let mut b2 = Bitmap::new();
+
+        b2.insert(151);
+        b2.insert(400);
+        b2.insert(700);
+        b2.insert_range(13..14);
+
+        b1.and_not(&b2);
+
+        assert!(b1.contains(10));
+        assert!(b1.contains(11));
+        assert!(b1.contains(12));
+        assert!(b1.contains(150));
+
+        assert_eq!(4, b1.cardinality());
+    }
+
+    #[test]
+    fn test_in_place_or_not() {
+        // TODO
+    }
+
+    #[test]
+    fn test_and_cardinality() {
+        let mut b1 = Bitmap::new();
+
+        b1.insert(150);
+        b1.insert(400);
+        b1.insert_range(10..14);
+
+        let mut b2 = Bitmap::new();
+
+        b2.insert(151);
+        b2.insert(400);
+        b2.insert(700);
+        b2.insert_range(13..14);
+
+        assert_eq!(2, b1.and_cardinality(&b2));
+    }
+
+    #[test]
+    fn test_or_cardinality() {
+        let mut b1 = Bitmap::new();
+
+        b1.insert(150);
+        b1.insert(400);
+        b1.insert_range(10..14);
+
+        let mut b2 = Bitmap::new();
+
+        b2.insert(151);
+        b2.insert(400);
+        b2.insert(700);
+        b2.insert_range(13..14);
+
+        assert_eq!(8, b1.or_cardinality(&b2));
+    }
+
+    #[test]
+    fn test_xor_cardinality() {
+        let mut b1 = Bitmap::new();
+
+        b1.insert(150);
+        b1.insert(400);
+        b1.insert_range(10..14);
+
+        let mut b2 = Bitmap::new();
+
+        b2.insert(151);
+        b2.insert(400);
+        b2.insert(700);
+        b2.insert_range(13..14);
+
+        assert_eq!(6, b1.xor_cardinality(&b2));
+    }
+
+    #[test]
+    fn test_and_not_cardinality() {
+        let mut b1 = Bitmap::new();
+
+        b1.insert(150);
+        b1.insert(400);
+        b1.insert_range(10..14);
+
+        let mut b2 = Bitmap::new();
+
+        b2.insert(151);
+        b2.insert(400);
+        b2.insert(700);
+        b2.insert_range(13..14);
+
+        assert_eq!(4, b1.and_not_cardinality(&b2));
+    }
+
+    #[test]
+    fn test_or_not_cardinality() {
+        // TODO
     }
 }
